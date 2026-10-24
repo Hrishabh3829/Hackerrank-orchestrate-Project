@@ -244,3 +244,115 @@ branch=main
 repo_root=C:\Projects\hackerrank-orchestrate-october26-main\hackerrank-orchestrate-october26-main
 worktree=main
 parent_agent=none
+
+## [2026-10-24T20:50:50Z] Improve public-sample accuracy
+
+User Prompt (verbatim, secrets redacted):
+|   |
+| - |
+
+Metric
+
+|   |
+| - |
+
+Current
+
+|   |
+| - |
+
+Target for next iteration
+
+|   |
+| - |
+
+Status accuracy
+
+|   |
+| - |
+
+90.63%
+
+|   |
+| - |
+
+Improve beyond 90.63%
+
+|   |
+| - |
+
+Exact row accuracy
+
+|   |
+| - |
+
+21.88%
+
+|   |
+| - |
+
+Improve beyond 21.88%
+
+|   |
+| - |
+
+Exact sequence accuracy
+
+|   |
+| - |
+
+21.88%
+
+|   |
+| - |
+
+Improve beyond 21.88%
+
+|   |
+| - |
+
+Step accuracy
+
+|   |
+| - |
+
+50.51%
+
+|   |
+| - |
+
+Improve beyond 50.51%
+
+|   |
+| - |
+
+Field accuracy
+
+|   |
+| - |
+
+63.63%
+
+|   |
+| - |
+
+Improve beyond 63.63%
+
+i need more accuracy
+
+Agent Response Summary:
+Improved general identity matching, evidence extraction, request-time resource discovery, policy state selection, and explicit marketing-consent classification. Public sample scores rose to 100.00% status, 43.75% exact rows and sequences, 63.92% exact steps, and 73.93% step fields; all five exceed the prior targets. Rebuilt and validated the 518-row output, and refreshed both evaluation and usage reports; no ZIP files were created.
+
+Actions:
+* Updated `code/timeline.py`, `code/evidence.py`, `code/policies.py`, and `code/investigation.py` with general evidence and policy handling improvements.
+* Added independent regression coverage in `code/evaluation/test_agent.py` and aligned sample evaluation with the production request pool.
+* Ran `.venv\Scripts\python.exe code\main.py`, the 30-case unittest suite, `code/evaluation/evaluate_samples.py`, and `code/evaluation/validate_output.py`.
+* Refreshed `code/evaluation/evaluation_report.md` and `code/evaluation/usage_report.md`, plus root copies.
+
+Context:
+tool=Codex desktop
+model=GPT-6
+branch=dev
+repo_root=C:\Projects\hackerrank-orchestrate-october26-main\hackerrank-orchestrate-october26-main
+worktree=main
+parent_agent=none

@@ -6,7 +6,7 @@ import re
 import unicodedata
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Iterable, Mapping
 
@@ -24,6 +24,10 @@ RESOURCE_ID_PATTERN = re.compile(
     r"marketing|cache|telemetry|email_delivery|secondary_identifier|legal_hold)[_-][0-9][A-Za-z0-9_-]*\b",
     re.IGNORECASE,
 )
+
+# Worker operations are used as narrow resource-discovery hints near the
+# request's reported result. They never establish the resource's current state.
+REQUEST_ACTIVITY_WINDOW = timedelta(minutes=10)
 
 RESOURCE_SCOPE_HINTS = (
     ("account_", "account_service", "USER_PROFILE"),
@@ -152,7 +156,10 @@ def _contains_identifier(text: str, identifier: str) -> bool:
         folded_candidate = _ascii_fold(candidate)
         if not any(char.isspace() for char in candidate):
             return _whole_token_pattern(folded_candidate).search(folded_text) is not None
-        return " ".join(folded_candidate.split()) in " ".join(folded_text.split())
+        name_pattern = r"(?<![\w])" + r"\s+".join(
+            re.escape(token) for token in folded_candidate.split()
+        ) + r"(?![\w])"
+        return re.search(name_pattern, folded_text) is not None
     return _whole_token_pattern(candidate).search(text) is not None
 
 
@@ -222,6 +229,9 @@ def build_case_timeline(
     subject: ResolvedSubject,
     audit_at: str,
     system_activity: Iterable[Mapping[str, str]],
+    *,
+    request: Mapping[str, str] | None = None,
+    request_pool: Iterable[Mapping[str, str]] = (),
 ) -> CaseTimeline:
     """Connect subject records, related resource IDs, and events up to cutoff."""
     if parse_timestamp(audit_at) is None:
@@ -294,6 +304,8 @@ def build_case_timeline(
     for index, event in enumerate(eligible_activities):
         if _subject_matches_text(event.get("details", ""), subject):
             include_activity(index)
+    for index in _reported_request_activity_indexes(request, request_pool, eligible_activities):
+        include_activity(index)
 
     while pending_records or pending_resources or pending_traces:
         while pending_records:
@@ -347,3 +359,84 @@ def _subject_matches_text(text: str, subject: ResolvedSubject) -> bool:
     return any(_contains_identifier(text, identifier) for identifier in strong) or any(
         _contains_identifier(text, identifier) for identifier in subject.weak_identifiers
     )
+
+
+def _reported_request_activity_indexes(
+    request: Mapping[str, str] | None,
+    request_pool: Iterable[Mapping[str, str]],
+    activities: tuple[Mapping[str, str], ...],
+) -> frozenset[int]:
+    """Link unique nearby deletion-worker targets to a request for lookup.
+
+    The target is only a retrieval seed. A current record or snapshot must
+    still prove the state used for classification and output.
+    """
+    if not request:
+        return frozenset()
+    case_id = request.get("case_id", "")
+    report_times = tuple(
+        (row.get("case_id", ""), parse_timestamp(row.get("reported_at", "")))
+        for row in request_pool
+    )
+    if not any(candidate_id == case_id for candidate_id, _ in report_times):
+        report_times += ((case_id, parse_timestamp(request.get("reported_at", ""))),)
+
+    action_types = {"DELETE_RECORD", "REDACT_RECORD", "ANONYMIZE_RECORD"}
+    uniquely_correlated: list[tuple[float, int]] = []
+    for index, event in enumerate(activities):
+        if event.get("source_system", "").casefold() != "deletion_worker":
+            continue
+        if event.get("event_type", "").upper() not in action_types:
+            continue
+        if not event.get("resource_id", "").strip():
+            continue
+        event_time = parse_timestamp(event.get("event_time", ""))
+        if event_time is None:
+            continue
+        nearby = [
+            (abs((event_time - report_time).total_seconds()), candidate_id)
+            for candidate_id, report_time in report_times
+            if report_time is not None
+            and abs(event_time - report_time) <= REQUEST_ACTIVITY_WINDOW
+        ]
+        if len(nearby) == 1 and nearby[0][1] == case_id:
+            uniquely_correlated.append((nearby[0][0], index))
+
+    # Use only primary-profile deletion and analytics anonymization as anchors.
+    # Generic search/support actions near a report time are too easy to confuse
+    # with unrelated background work. Closely grouped worker actions may still
+    # join as one request burst (for example, an account and its export).
+    anchors: list[tuple[float, int]] = []
+    for target_system, event_type in (
+        ("account_service", "DELETE_RECORD"),
+        ("analytics_platform", "ANONYMIZE_RECORD"),
+    ):
+        candidates = [
+            (distance, index)
+            for distance, index in uniquely_correlated
+            if activities[index].get("target_system", "").casefold() == target_system
+            and activities[index].get("event_type", "").upper() == event_type
+        ]
+        if not candidates:
+            continue
+        closest_distance = min(distance for distance, _ in candidates)
+        closest = [candidate for candidate in candidates if candidate[0] == closest_distance]
+        if len(closest) == 1:
+            anchors.append(closest[0])
+
+    linked: set[int] = set()
+    for distance, anchor_index in anchors:
+        linked.add(anchor_index)
+        anchor_time = parse_timestamp(activities[anchor_index].get("event_time", ""))
+        if anchor_time is None:
+            continue
+        linked.update(
+            index
+            for _, index in uniquely_correlated
+            if index != anchor_index
+            and abs(
+                (parse_timestamp(activities[index].get("event_time", "")) or anchor_time)
+                - anchor_time
+            ) <= timedelta(seconds=60)
+        )
+    return frozenset(linked)
