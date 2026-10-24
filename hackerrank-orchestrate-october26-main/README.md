@@ -34,8 +34,29 @@ Your solution must:
 Run the starter Python entry point with:
 
 ```bash
-python3 code/main.py
+python code/main.py
 ```
+
+At the current setup stage, this command validates and summarizes the required
+CSV inputs and evidence manifest. It does not create predictions yet; the
+case investigation and output pipeline are the next implementation step.
+
+## Python project layout
+
+The scaffold keeps each responsibility in its own module:
+
+| Module | Responsibility |
+| --- | --- |
+| `code/main.py` | CLI entry point and dataset intake summary |
+| `code/data_loading.py` | Read and validate the source CSV files and evidence manifest |
+| `code/identity_resolution.py` | Resolve request emails against current and historical identifiers at a cutoff |
+| `code/investigation.py` | Case-level evidence investigation hook |
+| `code/policies.py` | Load policy rules and look them up by data category |
+| `code/output_generation.py` | Validate steps and serialize sorted output rows |
+
+The current code uses only the Python standard library, so no third-party
+packages are required. `requirements.txt` is kept for dependencies added in
+later steps.
 
 The blank template at `dataset/output.csv` is provided as a reference. Your final generated file for submission must be the root-level `output.csv`.
 
