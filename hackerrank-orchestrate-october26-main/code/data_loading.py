@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +23,8 @@ class Dataset:
     system_activity: tuple[dict[str, str], ...]
     deletion_rules: tuple[dict[str, str], ...]
     evidence_manifest: dict[str, dict[str, str]]
+    sample_requests: tuple[dict[str, str], ...] = ()
+    sample_output: tuple[dict[str, str], ...] = ()
 
     def evidence_path(self, file_id: str) -> Path:
         """Return the on-disk path for a manifest entry."""
@@ -88,6 +91,25 @@ def load_dataset(dataset_dir: str | Path) -> Dataset:
             raise DatasetError(f"Evidence file listed in manifest is missing: {row['file_path']}")
         manifest[row["file_id"]] = row
 
+    sample_requests_path = base / "sample_deletion_requests.csv"
+    sample_output_path = base / "sample_output.csv"
+    sample_requests = _read_csv(sample_requests_path, _INPUTS["requests"][1]) if sample_requests_path.is_file() else []
+    sample_output = _read_csv(sample_output_path, {"case_id", "deletion_status", "steps_json"}) if sample_output_path.is_file() else []
+    if sample_output:
+        sample_ids = {row["case_id"] for row in sample_requests}
+        output_ids = [row["case_id"] for row in sample_output]
+        if len(output_ids) != len(set(output_ids)):
+            raise DatasetError("sample_output.csv contains duplicate case_id values")
+        if sample_ids and set(output_ids) != sample_ids:
+            raise DatasetError("sample_output.csv case IDs do not match sample_deletion_requests.csv")
+        for row in sample_output:
+            try:
+                steps = json.loads(row["steps_json"])
+            except json.JSONDecodeError as exc:
+                raise DatasetError(f"sample_output.csv has invalid steps_json for {row['case_id']}") from exc
+            if not isinstance(steps, list):
+                raise DatasetError(f"sample_output.csv steps_json must be an array for {row['case_id']}")
+
     return Dataset(
         dataset_dir=base,
         requests=tuple(tables["requests"]),
@@ -96,4 +118,6 @@ def load_dataset(dataset_dir: str | Path) -> Dataset:
         system_activity=tuple(tables["system_activity"]),
         deletion_rules=tuple(tables["deletion_rules"]),
         evidence_manifest=manifest,
+        sample_requests=tuple(sample_requests),
+        sample_output=tuple(sample_output),
     )

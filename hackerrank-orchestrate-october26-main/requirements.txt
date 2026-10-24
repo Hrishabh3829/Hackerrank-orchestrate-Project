@@ -1,1 +1,4 @@
-# This scaffold uses only the Python standard library.
+pypdf==6.21.2
+Pillow==13.0.0
+pytesseract==0.3.13
+packaging==26.3

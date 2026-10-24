@@ -31,32 +31,73 @@ Your solution must:
 - Generate one prediction row for every request in `dataset/deletion_requests.csv`
 - Write the final predictions to `output.csv` in the repository root
 
-Run the starter Python entry point with:
+The evaluated environment used Python 3.14.3. For the same measured accuracy,
+use Python 3.14.3 and the pinned packages below. Python 3.10 or newer can run
+the code, but a different runtime or OCR engine can change parsing results.
+Create a virtual environment and install the pinned Python packages from the
+repository root:
 
-```bash
-python code/main.py
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 ```
 
-At the current setup stage, this command validates and summarizes the required
-CSV inputs and evidence manifest. It does not create predictions yet; the
-case investigation and output pipeline are the next implementation step.
+Image evidence is read with Tesseract OCR through `pytesseract`. Install the
+Tesseract OCR engine for your operating system as well as the Python packages.
+The evaluated environment used Tesseract `5.4.0.20240606`; use that version to
+keep screenshot extraction consistent. The core audit logic is deterministic;
+using another OCR version can change the text extracted from screenshots. It
+must be on `PATH`, or set
+`TESSERACT_CMD` to its executable path. On Windows, the standard
+`C:\Program Files\Tesseract-OCR\tesseract.exe` location is detected
+automatically. All dataset and output paths resolve relative to the project,
+so the same command works from another checkout. Run the audit from the
+repository root:
+
+```bash
+python3 code/main.py
+```
+
+In Windows PowerShell, use `python code/main.py` after activating `.venv`.
+Run the custom checks and public sample comparison with:
+
+```powershell
+python -m unittest discover -s code/evaluation -p "test_*.py"
+python code/evaluation/evaluate_samples.py
+python code/evaluation/validate_output.py
+```
+
+The evaluation results and local usage accounting are recorded in
+[`code/evaluation/evaluation_report.md`](code/evaluation/evaluation_report.md)
+and [`code/evaluation/usage_report.md`](code/evaluation/usage_report.md).
+
+The production classifier has no case-ID branches or sample-answer lookup.
+It applies the same identity, evidence, and policy rules to each request. The
+public sample answers are read only by the separate evaluation command.
+
+The command reads the CSV inputs, indexes every file listed in
+`dataset/evidence_files.csv`, audits requests at their `audit_at` cutoff, and
+writes predictions to the repository-root `output.csv`. Use `--dataset-dir`
+and `--output` to provide alternate paths.
 
 ## Python project layout
 
-The scaffold keeps each responsibility in its own module:
+The implementation keeps each responsibility in its own module:
 
 | Module | Responsibility |
 | --- | --- |
-| `code/main.py` | CLI entry point and dataset intake summary |
+| `code/main.py` | CLI entry point for end-to-end deletion audits |
 | `code/data_loading.py` | Read and validate the source CSV files and evidence manifest |
 | `code/identity_resolution.py` | Resolve request emails against current and historical identifiers at a cutoff |
-| `code/investigation.py` | Case-level evidence investigation hook |
-| `code/policies.py` | Load policy rules and look them up by data category |
+| `code/evidence.py` | Extract records from JSON, SQL, logs, text, PDFs, and screenshots |
+| `code/timeline.py` | Link records and operational events using only evidence available by `audit_at` |
+| `code/investigation.py` | Classify request intent, resolve the subject, and build ordered findings and checks |
+| `code/policies.py` | Apply deletion, redaction, anonymization, retention, and recreation-risk rules |
 | `code/output_generation.py` | Validate steps and serialize sorted output rows |
 
-The current code uses only the Python standard library, so no third-party
-packages are required. `requirements.txt` is kept for dependencies added in
-later steps.
+PDF extraction uses `pypdf`; screenshot OCR uses `Pillow`, `pytesseract`, and
+the separately installed Tesseract executable.
 
 The blank template at `dataset/output.csv` is provided as a reference. Your final generated file for submission must be the root-level `output.csv`.
 
