@@ -111,10 +111,10 @@ def normalize_category(value: str, fallback: str = "") -> str:
         return "USER_EXPORT"
     if "MARKETING" in lowered:
         return "MARKETING_PROFILE"
-    if "DELIVERY" in lowered or "EMAIL_LOG" in lowered:
-        return "EMAIL_DELIVERY_LOG"
     if "ATTACHMENT" in lowered:
         return "SUPPORT_ATTACHMENT"
+    if "DELIVERY" in lowered or "EMAIL_LOG" in lowered:
+        return "EMAIL_DELIVERY_LOG"
     if "SUPPORT" in lowered or "TICKET" in lowered or "CONVERSATION" in lowered:
         return "SUPPORT_MESSAGE"
     if "PROFILE" in lowered or "ACCOUNT_PROFILE" in lowered or "ACCOUNT_SERVICE" in lowered:
@@ -459,6 +459,18 @@ def _read_log(evidence_id: str, available_at: str, file_path: str, path: Path) -
                 category = text_category
             else:
                 category = resource_category or text_category
+        # Consent and subscription records belong to the marketing policy even
+        # when their storage service is analytics. Classify from the record's
+        # explicit fields, rather than treating every analytics log as a
+        # marketing record.
+        marketing_fields = {
+            "email_opt_in", "marketing_opt_in", "promotional_opt_in",
+            "unsubscribe_status", "marketing_consent",
+        }
+        if category == "ANALYTICS_PROFILE" and marketing_fields.intersection(
+            key.casefold() for key in fields
+        ):
+            category = "MARKETING_PROFILE"
         if rid or category:
             records.append(_make_record(
                 evidence_id,
@@ -511,11 +523,24 @@ def _read_pdf(evidence_id: str, available_at: str, file_path: str, path: Path) -
         if not text.strip():
             continue
         lines = text.splitlines()
-        resource_ids = sorted(set(RESOURCE_PATTERN.findall(text)))
-        if resource_ids:
-            for resource_id in resource_ids:
-                index = next((i for i, line in enumerate(lines) if resource_id.casefold() in line.casefold()), 0)
-                excerpt = " ".join(lines[max(0, index - 2):index + 4])
+        first_line_by_resource: dict[str, int] = {}
+        for resource_id in RESOURCE_PATTERN.findall(text):
+            first_line_by_resource.setdefault(
+                resource_id,
+                next((i for i, line in enumerate(lines) if resource_id.casefold() in line.casefold()), 0),
+            )
+        if first_line_by_resource:
+            ordered_resources = sorted(first_line_by_resource.items(), key=lambda item: item[1])
+            for position, (resource_id, index) in enumerate(ordered_resources):
+                # Keep the nearby document section through the next distinct
+                # resource reference. One-page support forms often put the
+                # record ID in the header and the subject identifiers later.
+                next_resource_line = (
+                    ordered_resources[position + 1][1]
+                    if position + 1 < len(ordered_resources)
+                    else len(lines)
+                )
+                excerpt = " ".join(lines[max(0, index - 2):next_resource_line])
                 records.append(_make_record(evidence_id, available_at, file_path, "pdf", {"resource_id": resource_id, "page": page_number, "text": excerpt}, text=excerpt, resource_override=resource_id))
         else:
             records.append(_make_record(evidence_id, available_at, file_path, "pdf", {"page": page_number, "text": text}, text=text))

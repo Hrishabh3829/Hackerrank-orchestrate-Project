@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Mapping
+from typing import Iterable, Mapping
 
 from data_loading import Dataset
 from evidence import EvidenceCorpus
@@ -184,11 +184,21 @@ def _build_prediction(request: Mapping[str, str], timeline: CaseTimeline, datase
     case_id = request["case_id"]
 
     if violations:
-        findings = [step for assessment in violations if (step := _step_from_assessment(assessment, "FINDING"))]
-        remediations = [step for assessment in violations if (step := _step_from_assessment(assessment, "REMEDIATION"))]
+        findings = [
+            step for assessment in violations
+            if (step := _step_from_assessment(assessment, "FINDING"))
+        ]
+        remediations = [
+            step for assessment in violations
+            if (step := _step_from_assessment(assessment, "REMEDIATION"))
+        ]
         verification_by_resource: dict[tuple[str, str, str], Step] = {}
         for assessment in assessments:
-            step = _step_from_assessment(assessment, "VERIFICATION",include_verification_evidence=False)
+            step = _step_from_assessment(
+                assessment,
+                "VERIFICATION",
+                include_verification_evidence=False,
+            )
             if step:
                 key = (step.system_id, step.resource_id, step.operation)
                 prior = verification_by_resource.get(key)
@@ -197,15 +207,15 @@ def _build_prediction(request: Mapping[str, str], timeline: CaseTimeline, datase
         steps = _ordered_steps(findings + remediations + list(verification_by_resource.values()))
         return CasePrediction(case_id=case_id, deletion_status="INCOMPLETE", steps=steps)
 
-    verification_by_resource = {}
+    verification_by_resource: dict[tuple[str, str, str], Step] = {}
     for assessment in assessments:
         if not assessment.compliant:
             continue
         step = _step_from_assessment(
-    assessment,
-    "VERIFICATION",
-    include_verification_evidence=True,
-)
+            assessment,
+            "VERIFICATION",
+            include_verification_evidence=True,
+        )
         if not step:
             continue
         key = (step.system_id, step.resource_id, step.operation)
@@ -228,6 +238,8 @@ def investigate_case(
     request: Mapping[str, str],
     dataset: Dataset,
     corpus: EvidenceCorpus,
+    *,
+    request_pool: Iterable[Mapping[str, str]] | None = None,
 ) -> CasePrediction:
     """Investigate one request using only information available by audit_at."""
     case_id = request["case_id"]
@@ -235,10 +247,13 @@ def investigate_case(
         return CasePrediction(case_id=case_id, deletion_status="NOT_APPLICABLE", steps=())
 
     subject = _resolve_case_subject(request, dataset)
+    comparable_requests = tuple(request_pool) if request_pool is not None else dataset.requests
     timeline = build_case_timeline(
         corpus,
         subject,
         request.get("audit_at", ""),
         dataset.system_activity,
+        request=request,
+        request_pool=comparable_requests,
     )
     return _build_prediction(request, timeline, dataset)

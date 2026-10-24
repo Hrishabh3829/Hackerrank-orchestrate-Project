@@ -202,6 +202,39 @@ def _time(value: str) -> datetime:
     return parsed or datetime.min.replace(tzinfo=timezone.utc)
 
 
+def _observation_detail_rank(record: EvidenceRecord) -> tuple[int, int]:
+    """Prefer same-time observations that carry an explicit state signal."""
+    fields = record.fields
+    if record.data_category == "DATA_FLOW":
+        state_keys = ("enabled", "active", "status", "state", "result")
+    elif record.data_category == "BACKUP_ARCHIVE":
+        state_keys = (
+            "restore_allowed", "restore_enabled", "eligible", "deletion_block",
+            "status", "state", "result",
+        )
+    else:
+        state_keys = (
+            "exists", "record_exists", "present", "found", "is_deleted",
+            "status_code", "http_status", "result", "state",
+        )
+    explicit = sum(
+        key in fields and fields[key] not in (None, "")
+        for key in state_keys
+    )
+    normalized = _normalized_state(record)
+    return explicit, int(normalized not in {"PRESENT", "ACTIVE"})
+
+
+def _record_observation_key(record: EvidenceRecord) -> tuple[datetime, datetime, int, int]:
+    detail_rank = _observation_detail_rank(record)
+    return (
+        _time(record.observed_at),
+        _time(record.available_at),
+        detail_rank[0],
+        detail_rank[1],
+    )
+
+
 def _latest_by_component(
     records: Iterable[EvidenceRecord],
     coverage: Iterable[EvidenceCoverage],
@@ -223,7 +256,7 @@ def _latest_by_component(
 
     latest: list[tuple[EvidenceRecord | EvidenceCoverage, str]] = []
     for component, component_records in grouped.items():
-        current_record = max(component_records, key=lambda record: (_time(record.observed_at), _time(record.available_at)))
+        current_record = max(component_records, key=_record_observation_key)
         component_coverage = coverage_by_component.get(component, [])
         if not component_coverage:
             # JSON/SQL readers may encode table names in the component while
@@ -321,10 +354,48 @@ def assess_timeline(timeline: CaseTimeline, rules: Iterable[DeletionRule]) -> tu
             == (system_id, resource_id, category)
         ]
         if not action_records:
+            category_rules = rules_for_category(category, rule_set)
+            unconditional_deletion = any(
+                rule.condition.strip().casefold() == "always"
+                and rule.required_action == "DELETE"
+                for rule in category_rules
+            )
+            current_scopes: dict[str, EvidenceCoverage] = {}
+            for scope in timeline.coverage:
+                if (scope.system_id, scope.data_category) != (system_id, category):
+                    continue
+                prior = current_scopes.get(scope.source_component)
+                if prior is None or (_time(scope.observed_at), _time(scope.available_at)) > (
+                    _time(prior.observed_at), _time(prior.available_at),
+                ):
+                    current_scopes[scope.source_component] = scope
+            has_snapshot_absence = bool(current_scopes) and all(
+                resource_id not in scope.present_resource_ids
+                for scope in current_scopes.values()
+            )
+            if unconditional_deletion and observations and has_snapshot_absence:
+                evidence_item = max(
+                    (item for item, state in observations if state == "ABSENT"),
+                    key=lambda item: (_time(item.observed_at), _time(item.available_at)),
+                    default=None,
+                )
+                if evidence_item is not None:
+                    assessments.append(PolicyAssessment(
+                        system_id=system_id,
+                        resource_id=resource_id,
+                        data_category=category,
+                        action="DELETE",
+                        state="ABSENT",
+                        evidence_id=evidence_item.evidence_id,
+                        observed_at=evidence_item.observed_at,
+                        verification_operation="VERIFY_RECORD_ABSENT",
+                        verification_state="ABSENT",
+                        compliant=True,
+                    ))
             continue
         action_record = max(
             action_records,
-            key=lambda item: (_time(item.observed_at), _time(item.available_at)),
+            key=_record_observation_key,
         )
         action = _rule_action(category, action_record, rule_set, timeline.audit_at)
         if not action:
@@ -438,7 +509,7 @@ def assess_timeline(timeline: CaseTimeline, rules: Iterable[DeletionRule]) -> tu
     ]
     for system_id, resource_id, category in sorted(set(backup_keys)):
         records = [record for record in timeline.evidence_records if (record.system_id, record.resource_id, record.data_category) == (system_id, resource_id, category)]
-        latest = max(records, key=lambda record: (_time(record.observed_at), _time(record.available_at)))
+        latest = max(records, key=_record_observation_key)
         can_block = parse_bool(latest.fields.get("can_block_restore", latest.fields.get("restore_access_blockable")))
         allowed = parse_bool(latest.fields.get("restore_allowed", latest.fields.get("restore_enabled")))
         result = str(latest.fields.get("result", latest.fields.get("status", ""))).upper()

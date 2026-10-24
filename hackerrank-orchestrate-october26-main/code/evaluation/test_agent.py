@@ -13,7 +13,7 @@ CODE_DIR = Path(__file__).resolve().parents[1]
 if str(CODE_DIR) not in sys.path:
     sys.path.insert(0, str(CODE_DIR))
 
-from evidence import EvidenceCorpus, EvidenceCoverage, EvidenceRecord, _read_json, _read_log  # noqa: E402
+from evidence import EvidenceCorpus, EvidenceCoverage, EvidenceRecord, _read_json, _read_log, normalize_category  # noqa: E402
 from identity_resolution import ResolvedSubject, resolve_subjects  # noqa: E402
 from investigation import request_authorizes_deletion  # noqa: E402
 from output_generation import CasePrediction, Step, write_output  # noqa: E402
@@ -84,6 +84,10 @@ class AgentBehaviorTests(unittest.TestCase):
         self.assertTrue(_contains_identifier("Caller: +1 (202) 555-0107", "+1 202 555 0107"))
         self.assertFalse(_contains_identifier("Unrelated id 1202555010799", "2025550107"))
 
+    def test_name_match_requires_token_boundaries(self) -> None:
+        self.assertTrue(_contains_identifier("Profile name: Priya Raman.", "Priya Raman"))
+        self.assertFalse(_contains_identifier("Profile name: Priya Ramanathan.", "Priya Raman"))
+
     def test_email_hash_is_matched_as_an_opaque_identifier(self) -> None:
         digest = "44a65154bfd8e408852578fbd76813d094d1944f255ac1769ee81ba90492f10e"
         self.assertTrue(_contains_identifier(f"correlation_key={digest}", digest))
@@ -123,6 +127,86 @@ class AgentBehaviorTests(unittest.TestCase):
         self.assertIn("data_flow_101", timeline.resource_ids)
         self.assertIn("search_101", timeline.resource_ids)
         self.assertEqual([item.resource_id for item in timeline.evidence_records], ["search_101"])
+
+    def test_unique_report_time_links_activity_target_to_snapshot_absence(self) -> None:
+        request = {"case_id": "case_a", "reported_at": "2026-09-10T00:00:00Z"}
+        activity = {
+            "activity_id": "activity_delete", "event_time": "2026-09-10T00:02:00Z",
+            "event_type": "DELETE_RECORD", "source_system": "deletion_worker",
+            "target_system": "account_service", "resource_id": "account_101",
+            "reported_result": "SUCCESS", "details": "Deletion operation completed.",
+        }
+        scope = EvidenceCoverage(
+            evidence_id="file_snapshot", available_at="2026-09-11T00:00:00Z",
+            observed_at="2026-09-11T00:00:00Z", system_id="account_service",
+            data_category="USER_PROFILE", source_component="accounts",
+            present_resource_ids=frozenset(), file_path="snapshot.sql",
+        )
+        timeline = build_case_timeline(
+            EvidenceCorpus(records=(), coverage=(scope,)),
+            ResolvedSubject("user_007", frozenset({"user_007"})),
+            "2026-09-20T00:00:00Z", (activity,),
+            request=request, request_pool=(request,),
+        )
+        self.assertIn("account_101", timeline.resource_ids)
+        self.assertEqual(len(timeline.activity_events), 1)
+        assessments = assess_timeline(timeline, rules_from_rows(({
+            "rule_id": "rule_profile", "data_category": "USER_PROFILE",
+            "condition": "Always", "required_action": "DELETE",
+        },)))
+        self.assertEqual(len(assessments), 1)
+        self.assertEqual(assessments[0].verification_operation, "VERIFY_RECORD_ABSENT")
+        self.assertEqual(assessments[0].evidence_id, "file_snapshot")
+
+    def test_report_time_activity_link_is_skipped_for_ambiguous_requests(self) -> None:
+        requests = (
+            {"case_id": "case_a", "reported_at": "2026-09-10T00:00:00Z"},
+            {"case_id": "case_b", "reported_at": "2026-09-10T00:00:00Z"},
+        )
+        activity = {
+            "activity_id": "activity_delete", "event_time": "2026-09-10T00:02:00Z",
+            "event_type": "DELETE_RECORD", "source_system": "deletion_worker",
+            "target_system": "account_service", "resource_id": "account_101",
+            "reported_result": "SUCCESS", "details": "Deletion operation completed.",
+        }
+        timeline = build_case_timeline(
+            EvidenceCorpus(records=(), coverage=()),
+            ResolvedSubject("user_007", frozenset({"user_007"})),
+            "2026-09-20T00:00:00Z", (activity,),
+            request=requests[0], request_pool=requests,
+        )
+        self.assertNotIn("account_101", timeline.resource_ids)
+        self.assertEqual(timeline.activity_events, ())
+
+    def test_report_time_link_uses_only_the_nearest_action_burst(self) -> None:
+        request = {"case_id": "case_a", "reported_at": "2026-09-10T00:00:00Z"}
+        activities = (
+            {
+                "activity_id": "activity_account", "event_time": "2026-09-10T00:00:00Z",
+                "event_type": "DELETE_RECORD", "source_system": "deletion_worker",
+                "target_system": "account_service", "resource_id": "account_101",
+                "reported_result": "SUCCESS", "details": "Profile action completed.",
+            },
+            {
+                "activity_id": "activity_export", "event_time": "2026-09-10T00:00:30Z",
+                "event_type": "DELETE_RECORD", "source_system": "deletion_worker",
+                "target_system": "export_service", "resource_id": "export_101",
+                "reported_result": "SUCCESS", "details": "Export action completed.",
+            },
+            {
+                "activity_id": "activity_search", "event_time": "2026-09-10T00:05:00Z",
+                "event_type": "DELETE_RECORD", "source_system": "deletion_worker",
+                "target_system": "search_service", "resource_id": "search_101",
+                "reported_result": "SUCCESS", "details": "Search action completed.",
+            },
+        )
+        timeline = build_case_timeline(
+            EvidenceCorpus(records=(), coverage=()),
+            ResolvedSubject("user_007", frozenset({"user_007"})),
+            "2026-09-20T00:00:00Z", activities,
+            request=request, request_pool=(request,),
+        )
+        self.assertEqual(timeline.resource_ids, frozenset({"account_101", "export_101"}))
 
     def test_timeline_joins_related_log_rows_by_scoped_trace_id(self) -> None:
         direct = EvidenceRecord(
@@ -176,6 +260,33 @@ class AgentBehaviorTests(unittest.TestCase):
         assessments = assess_timeline(timeline, rules=())
         self.assertTrue(any(item.violation_operation == "REPORT_ACTIVE_DATA_FLOW" for item in assessments))
         self.assertTrue(any(item.remediation_operation == "DISABLE_DATA_FLOW" for item in assessments))
+
+    def test_same_time_flow_observations_prefer_explicit_state(self) -> None:
+        observed_at = "2026-09-10T00:00:00Z"
+        common = {
+            "available_at": observed_at, "observed_at": observed_at,
+            "system_id": "integration_service", "resource_id": "data_flow_101",
+            "data_category": "DATA_FLOW", "source_component": "connector_log",
+            "file_path": "fixture.log", "source_kind": "log",
+        }
+        start = EvidenceRecord(
+            evidence_id="file_start", fields={"event": "connector_config_read_started"},
+            text="connector_config_read_started", **common,
+        )
+        complete = EvidenceRecord(
+            evidence_id="file_complete",
+            fields={"event": "connector_config_read_completed", "enabled": "true"},
+            text="connector_config_read_completed enabled=true", **common,
+        )
+        timeline = CaseTimeline(
+            subject=ResolvedSubject("user_007", frozenset({"user_007"})),
+            audit_at="2026-09-20T00:00:00Z", evidence_records=(start, complete),
+            coverage=(), activity_events=(), resource_ids=frozenset({"data_flow_101"}),
+        )
+        assessments = assess_timeline(timeline, rules=())
+        flow_assessment = next(item for item in assessments if item.data_category == "DATA_FLOW")
+        self.assertEqual(flow_assessment.state, "ACTIVE")
+        self.assertEqual(flow_assessment.evidence_id, "file_complete")
 
     def test_restore_candidate_without_deletion_block_is_a_live_risk(self) -> None:
         backup = EvidenceRecord(
@@ -294,6 +405,19 @@ class AgentBehaviorTests(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0].data_category, "DATA_FLOW")
 
+    def test_marketing_consent_log_uses_marketing_deletion_policy(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="deletion-audit-log-") as temporary_dir:
+            log_path = Path(temporary_dir) / "events.log"
+            log_path.write_text(
+                '2026-09-10T00:00:00Z service=analytics_platform '
+                'resource_id=analytics_101 email_opt_in=true event=contact_lookup_completed\n',
+                encoding="utf-8",
+            )
+            records = _read_log("file_log", "2026-09-10T00:00:00Z", str(log_path), log_path)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].data_category, "MARKETING_PROFILE")
+        self.assertEqual(records[0].system_id, "analytics_platform")
+
     def test_log_service_instance_is_not_mistaken_for_customer_resource(self) -> None:
         with tempfile.TemporaryDirectory(prefix="deletion-audit-log-") as temporary_dir:
             log_path = Path(temporary_dir) / "events.log"
@@ -327,6 +451,12 @@ class AgentBehaviorTests(unittest.TestCase):
             )
             records = _read_log("file_log", "2026-09-10T00:00:00Z", str(log_path), log_path)
         self.assertEqual(records[0].data_category, "SUPPORT_ATTACHMENT")
+
+    def test_attachment_context_precedes_incidental_delivery_wording(self) -> None:
+        self.assertEqual(
+            normalize_category("", "delivery_correction_attachment.pdf"),
+            "SUPPORT_ATTACHMENT",
+        )
 
     def test_nested_json_collection_outweighs_export_filename(self) -> None:
         with tempfile.TemporaryDirectory(prefix="deletion-audit-json-") as temporary_dir:
