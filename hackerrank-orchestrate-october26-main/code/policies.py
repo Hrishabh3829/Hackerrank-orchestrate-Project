@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 
 from evidence import EvidenceCoverage, EvidenceRecord
 from identity_resolution import ResolvedSubject
-from timeline import CaseTimeline, parse_timestamp, scope_hint
+from timeline import CaseTimeline, _contains_identifier, parse_timestamp, scope_hint
 
 
 @dataclass(frozen=True)
@@ -93,11 +92,21 @@ def _normalized_state(record: EvidenceRecord) -> str:
             return "ACTIVE"
         if allowed is False:
             return "BLOCKED"
+        eligible = parse_bool(fields.get("eligible"))
+        deletion_block = parse_bool(fields.get("deletion_block"))
+        if eligible is True and deletion_block is False:
+            return "ACTIVE"
+        if eligible is False or deletion_block is True:
+            return "BLOCKED"
         if any(marker in text_state for marker in ("restore allowed", "can still be restored", "restore access enabled", "restorable")):
             return "ACTIVE"
         if any(marker in text_state for marker in ("restore blocked", "restore disabled", "restore access blocked")):
             return "BLOCKED"
-    for key in ("result", "state", "status", "record_status", "account_status", "deletion_status", "restore_status"):
+    # Account/deletion status fields describe a workflow or soft-delete label;
+    # they do not negate the existence of a row found in a source snapshot.
+    # This also keeps deleted-account tombstones eligible for PII checks.
+    state_fields = ["result", "state", "status", "record_status", "restore_status"]
+    for key in state_fields:
         value = fields.get(key)
         if value is None:
             continue
@@ -148,33 +157,26 @@ def _normalized_state(record: EvidenceRecord) -> str:
     return "PRESENT"
 
 
-def _contains_identifier(text: str, identifier: str) -> bool:
-    value = identifier.strip()
-    if not value:
-        return False
-    if "@" in value or len(value) >= 16 and value.isalnum():
-        return value.casefold() in text.casefold()
-    digits = re.sub(r"\D", "", value)
-    if 7 <= len(digits) <= 15 and not any(char.isalpha() for char in value):
-        return digits in re.sub(r"\D", "", text)
-    if any(char.isspace() for char in value):
-        return " ".join(value.casefold().split()) in " ".join(text.casefold().split())
-    return re.search(rf"(?<![\w]){re.escape(value)}(?![\w])", text, re.IGNORECASE) is not None
-
-
-def _has_direct_identifier(record: EvidenceRecord, subject: ResolvedSubject) -> bool:
+def _has_direct_identifier(
+    record: EvidenceRecord,
+    subject: ResolvedSubject,
+    *,
+    include_linkage: bool = False,
+) -> bool:
     direct_fields = {
         "name", "full_name", "display_name", "email", "owner_email", "customer_email",
         "requester_email", "recipient_email", "email_address", "recipient", "to",
         "phone", "owner_phone", "requester_phone", "email_hash",
-        "subject_reference", "customer_reference", "user_id", "user_reference",
         "message", "message_text", "message_excerpt", "document", "profile", "record_json",
     }
-    identifiers = tuple(subject.identifiers)
+    if include_linkage:
+        direct_fields.update({"subject_reference", "customer_reference", "user_id", "user_reference"})
+    identifiers = tuple(value for value in subject.identifiers if include_linkage or value != subject.user_id)
     if record.data_category == "EMAIL_DELIVERY_LOG":
         identifiers = tuple(value for value in identifiers if "@" in value)
     if record.data_category == "ACCOUNT_TOMBSTONE":
         direct_fields -= {"user_id", "user_reference", "customer_reference"}
+        direct_fields.discard("subject_reference")
 
     needles = identifiers
 
@@ -189,7 +191,10 @@ def _has_direct_identifier(record: EvidenceRecord, subject: ResolvedSubject) -> 
             return False
         return any(_contains_identifier(value, needle) for needle in needles)
 
-    return visit(record.fields)
+    return visit(record.fields) or any(
+        _contains_identifier(record.text, identifier)
+        for identifier in needles
+    )
 
 
 def _time(value: str) -> datetime:
@@ -275,6 +280,10 @@ def _rule_action(category: str, record: EvidenceRecord, rules: tuple[DeletionRul
             return "REDACT"
     if category == "SUPPORT_MESSAGE":
         shared = parse_bool(fields.get("shared_context", fields.get("shared_with_others")))
+        event = str(fields.get("event", fields.get("event_type", ""))).casefold()
+        marker_found = parse_bool(fields.get("marker_found"))
+        if "deletion_marker" in event and marker_found is False:
+            return "DELETE"
         if shared is False:
             return "DELETE"
     return action
@@ -303,12 +312,20 @@ def assess_timeline(timeline: CaseTimeline, rules: Iterable[DeletionRule]) -> tu
         )
         if not observations:
             continue
+        # Coverage can be the newest observation and establish that the
+        # resource is absent. Keep a real resource row for category-specific
+        # policy conditions and use the coverage item as the proof of absence.
+        action_records = [
+            record for record in timeline.evidence_records
+            if (record.system_id, record.resource_id, record.data_category)
+            == (system_id, resource_id, category)
+        ]
+        if not action_records:
+            continue
         action_record = max(
-            (item for item, _ in observations),
+            action_records,
             key=lambda item: (_time(item.observed_at), _time(item.available_at)),
         )
-        if not isinstance(action_record, EvidenceRecord):
-            continue
         action = _rule_action(category, action_record, rule_set, timeline.audit_at)
         if not action:
             continue
@@ -349,7 +366,11 @@ def assess_timeline(timeline: CaseTimeline, rules: Iterable[DeletionRule]) -> tu
                 continue
         elif action == "ANONYMIZE":
             verification_operation, verification_state = "VERIFY_RECORD_ANONYMIZED", "ANONYMIZED"
-            attributable = [item for item, _ in present if isinstance(item, EvidenceRecord) and _has_direct_identifier(item, timeline.subject)]
+            attributable = [
+                item for item, _ in present
+                if isinstance(item, EvidenceRecord)
+                and _has_direct_identifier(item, timeline.subject, include_linkage=True)
+            ]
             if attributable:
                 violation_item = max(attributable, key=lambda item: (_time(item.observed_at), _time(item.available_at)))
                 violation_operation = "REPORT_EXPOSED_PII"
@@ -421,7 +442,11 @@ def assess_timeline(timeline: CaseTimeline, rules: Iterable[DeletionRule]) -> tu
         can_block = parse_bool(latest.fields.get("can_block_restore", latest.fields.get("restore_access_blockable")))
         allowed = parse_bool(latest.fields.get("restore_allowed", latest.fields.get("restore_enabled")))
         result = str(latest.fields.get("result", latest.fields.get("status", ""))).upper()
-        if can_block is not False and (allowed is True or result in {"ACTIVE", "RESTORE_ALLOWED", "RESTORABLE"}):
+        if can_block is not False and (
+            allowed is True
+            or result in {"ACTIVE", "RESTORE_ALLOWED", "RESTORABLE"}
+            or _normalized_state(latest) == "ACTIVE"
+        ):
             assessments.append(PolicyAssessment(
                 system_id=system_id,
                 resource_id=resource_id,
@@ -437,7 +462,7 @@ def assess_timeline(timeline: CaseTimeline, rules: Iterable[DeletionRule]) -> tu
                 verification_state="BLOCKED",
                 compliant=False,
             ))
-        elif allowed is False or result in {"BLOCKED", "RESTORE_BLOCKED"}:
+        elif allowed is False or result in {"BLOCKED", "RESTORE_BLOCKED"} or _normalized_state(latest) == "BLOCKED":
             assessments.append(PolicyAssessment(
                 system_id=system_id,
                 resource_id=resource_id,

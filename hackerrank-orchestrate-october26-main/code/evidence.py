@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
+import shutil
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -126,7 +128,7 @@ def normalize_category(value: str, fallback: str = "") -> str:
 
 def infer_system(value: str, category: str = "", component: str = "") -> str:
     candidate = " ".join((value, component)).casefold()
-    if "identity" in candidate or "tombstone" in candidate:
+    if "identity" in candidate or "tombstone" in candidate or category == "ACCOUNT_TOMBSTONE":
         return "identity_service"
     if "account" in candidate or category == "USER_PROFILE":
         return "account_service"
@@ -173,10 +175,29 @@ def _flatten_text(value: Any) -> str:
     return str(value) if value is not None else ""
 
 
-def _resource_id(fields: Mapping[str, Any], text: str = "") -> str:
+def _resource_id(
+    fields: Mapping[str, Any],
+    text: str = "",
+    *,
+    allow_unlabelled_text: bool = True,
+) -> str:
     value = _first_text(fields, ("resource_id", "_id", "record_id", "tombstone_id", "ticket_id", "archive_id", "export_id", "object_id"))
     if value:
         return value
+    if not allow_unlabelled_text:
+        # Structured logs also contain service instance names such as
+        # ``instance=account-2``. Those identify a host, not a customer record.
+        # Accept only a resource token attached to a resource-like field label.
+        match = re.search(
+            r"\b(?:resource_id|record_id|tombstone_id|ticket_id|archive_id|export_id|object_id)"
+            r"\s*[:=]\s*[\"']?"
+            r"((?:account|search|support|analytics|audit_record|tombstone|data_flow|backup|export|"
+            r"marketing|cache|telemetry|email_delivery|secondary_identifier|legal_hold|support_attachment)"
+            r"[_-]\d[A-Za-z0-9_-]*)",
+            text,
+            re.IGNORECASE,
+        )
+        return match.group(1) if match else ""
     match = RESOURCE_PATTERN.search(text)
     return match.group(0) if match else ""
 
@@ -191,25 +212,49 @@ def _make_record(
     text: str = "",
     observed_at: str = "",
     resource_override: str = "",
+    allow_unlabelled_resource_text: bool = True,
 ) -> EvidenceRecord:
     context = context or {}
     combined = {**context, **fields}
-    category_value = _first_text(combined, ("data_category", "record_type", "category", "collection", "table_name"))
-    category = normalize_category(
-        category_value,
-        " ".join((file_path, context.get("service", ""), context.get("data_store", ""), context.get("origin_system", ""))),
-    )
-    component = _first_text(combined, ("collection", "table_name", "source_component", "system")) or context.get("collection", "") or context.get("table", "")
-    system_value = _first_text(combined, ("system_id", "system", "service", "service_id", "origin_system", "data_store", "source_system"))
-    system_id = infer_system(system_value or context.get("service", "") or context.get("data_store", "") or context.get("origin", ""), category, component)
-    timestamp = observed_at or _first_text(combined, ("observed_at", "recorded_at", "event_time", "captured_at", "updated_at", "indexed_at", "created_at", "exported_at")) or available_at
     rendered = text or _flatten_text(fields)
+    resource_id = resource_override or _resource_id(
+        fields,
+        rendered,
+        allow_unlabelled_text=allow_unlabelled_resource_text,
+    )
+    explicit_category = _first_text(fields, ("data_category", "record_type", "category"))
+    category = normalize_category(explicit_category)
+    # In nested JSON exports, generic table names such as "profiles" can
+    # contain records exported from a different service. A typed resource ID
+    # is the stronger signal when no explicit category field exists.
+    if not category and source_kind == "json":
+        category = normalize_category("", resource_id)
+    category_value = _first_text(combined, ("collection", "table_name"))
+    if not category:
+        category = normalize_category(
+            category_value,
+            " ".join((context.get("service", ""), context.get("data_store", ""), context.get("origin_system", ""))),
+        )
+    if not category:
+        category = normalize_category(
+            "",
+            " ".join((file_path, context.get("service", ""), context.get("data_store", ""), context.get("origin_system", ""))),
+        )
+    component = _first_text(combined, ("collection", "table_name", "source_component", "system")) or context.get("collection", "") or context.get("table", "")
+    system_value = _first_text(fields, ("system_id", "system", "service_id", "service", "origin_system", "data_store", "source_system"))
+    if system_value:
+        system_id = infer_system(system_value, category, component)
+    elif source_kind == "json" and normalize_category("", resource_id):
+        system_id = infer_system("", category, component)
+    else:
+        system_id = infer_system(context.get("service", "") or context.get("data_store", "") or context.get("origin", ""), category, component)
+    timestamp = observed_at or _first_text(combined, ("observed_at", "recorded_at", "event_time", "captured_at", "updated_at", "indexed_at", "created_at", "exported_at")) or available_at
     return EvidenceRecord(
         evidence_id=evidence_id,
         available_at=available_at,
         observed_at=timestamp,
         system_id=system_id,
-        resource_id=resource_override or _resource_id(fields, rendered),
+        resource_id=resource_id,
         data_category=category,
         source_component=component or source_kind,
         file_path=file_path,
@@ -245,7 +290,10 @@ def _read_json(evidence_id: str, available_at: str, file_path: str, path: Path) 
             field = value.get(key)
             if isinstance(field, str) and field.strip():
                 current[key] = field.strip()
-        if parent_key and parent_key not in {"records", "snapshots", "service_exports"} and "collection" not in current:
+        if parent_key and parent_key not in {"records", "snapshots", "service_exports"}:
+            # In nested service exports the service name is the parent of the
+            # table list. The table (for example, tickets or connectors) is a
+            # more precise category signal than the surrounding JSON filename.
             current["collection"] = parent_key
 
         if "records" in value and isinstance(value["records"], list):
@@ -399,12 +447,31 @@ def _read_log(evidence_id: str, available_at: str, file_path: str, path: Path) -
         if not line.strip():
             continue
         observed, fields = _parse_key_value_line(line)
-        rid = _resource_id(fields, line)
-        category = normalize_category(_first_text(fields, ("data_category", "record_type", "category", "collection")), line)
+        rid = _resource_id(fields, line, allow_unlabelled_text=False)
+        # Prefer explicit category metadata, then the resource identifier, then
+        # free-form message text. Log messages often mention exports or restores
+        # while describing a different resource, so prose must be the last resort.
+        category = normalize_category(_first_text(fields, ("data_category", "record_type", "category", "collection")))
         if not category:
-            category = normalize_category("", rid)
+            text_category = normalize_category("", line)
+            resource_category = normalize_category("", rid)
+            if text_category == "SUPPORT_ATTACHMENT" and resource_category == "SUPPORT_MESSAGE":
+                category = text_category
+            else:
+                category = resource_category or text_category
         if rid or category:
-            records.append(_make_record(evidence_id, available_at, file_path, "log", fields, {"collection": category}, text=line, observed_at=observed, resource_override=rid))
+            records.append(_make_record(
+                evidence_id,
+                available_at,
+                file_path,
+                "log",
+                fields,
+                {"collection": category},
+                text=line,
+                observed_at=observed,
+                resource_override=rid,
+                allow_unlabelled_resource_text=False,
+            ))
     return records
 
 
@@ -481,6 +548,13 @@ def _read_image(evidence_id: str, available_at: str, file_path: str, path: Path)
         import pytesseract
     except ImportError as exc:
         raise EvidenceReadError("Screenshot reading requires Pillow and pytesseract; install requirements.txt and Tesseract OCR") from exc
+    configured_tesseract = os.environ.get("TESSERACT_CMD", "").strip()
+    if configured_tesseract:
+        pytesseract.pytesseract.tesseract_cmd = configured_tesseract
+    elif shutil.which("tesseract") is None:
+        windows_default = Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe")
+        if windows_default.is_file():
+            pytesseract.pytesseract.tesseract_cmd = str(windows_default)
     try:
         with Image.open(path) as image:
             text = pytesseract.image_to_string(image)

@@ -15,16 +15,21 @@ from timeline import CaseTimeline, build_case_timeline
 
 
 _DELETION_PATTERNS = (
-    re.compile(r"\b(delete|deletion|erase|erasure|destroy|purge)\b", re.IGNORECASE),
-    re.compile(r"\b(close|remove)\s+(?:my|this|the|associated)\s+account\b", re.IGNORECASE),
-    re.compile(r"\b(remove|erase|delete)\b.{0,80}\b(account|personal (?:data|information))\b", re.IGNORECASE),
+    re.compile(r"\b(delete|deletes|deleted|deleting|deletion|erase|erased|erasing|erasure|destroy|destroyed|purge|purged)\b", re.IGNORECASE),
+    re.compile(r"\b(close|closed|closing|remove|removed|removing)\s+(?:my|this|the|associated|linked)\s+(?:user\s+)?(?:account|profile)\b", re.IGNORECASE),
+    re.compile(r"\b(remove|erase|delete|purge|clean|clear)\b.{0,120}\b(account|profile|personal (?:data|information|details)|records?|copies?|search results?|export files?|traces?)\b", re.IGNORECASE),
     re.compile(r"\baccount[- ]deletion\b", re.IGNORECASE),
+    re.compile(r"\b(?:account|profile)\b.{0,50}\b(?:gone|deleted|removed|erased|closed)\b", re.IGNORECASE),
+    re.compile(r"\b(?:verify|confirm|check|inspect|review|audit)\b.{0,120}\b(?:gone|deleted|removed|erased|deletion)\b", re.IGNORECASE),
 )
 _NON_DELETION_PATTERNS = (
     re.compile(r"\bmarketing (?:lists?|emails?) only\b", re.IGNORECASE),
-    re.compile(r"\b(?:stop|unsubscribe|opt[ -]?out)\b.{0,50}\b(?:promotional|marketing|emails?)\b", re.IGNORECASE),
-    re.compile(r"\b(?:download|export|copy of|access|tell me what|information do you hold)\b", re.IGNORECASE),
-    re.compile(r"\b(?:change|correct|correction|update|misspelled|out of date|reset(?:ting)?)\b", re.IGNORECASE),
+    re.compile(r"\b(?:stop|unsubscribe|opt[ -]?out)\b.{0,60}\b(?:promotional|marketing|emails?)\b", re.IGNORECASE),
+    re.compile(r"\b(?:download|get|request|export)\b.{0,60}\b(?:my data|my information|an export|a copy|a copy of my data)\b", re.IGNORECASE),
+    re.compile(r"\b(?:send|provide)\s+me\b.{0,60}\b(?:my data|my information|an export|a copy)\b", re.IGNORECASE),
+    re.compile(r"\b(?:access|tell me what|what information|what data)\b.{0,60}\b(?:my data|my account|you hold|you store)\b", re.IGNORECASE),
+    re.compile(r"\b(?:change|correct|correction|update|reset(?:ting)?)\b.{0,60}\b(?:my|the)\s+(?:email|phone|name|address|password|contact details)\b", re.IGNORECASE),
+    re.compile(r"\b(?:misspelled|out of date|incorrect)\b.{0,40}\b(?:email|phone|name|address|contact details)\b", re.IGNORECASE),
     re.compile(r"\b(?:invoice|invoices|billing statement)\b", re.IGNORECASE),
     re.compile(r"\b(?:do not|don't|never)\s+(?:delete|erase|remove)\b", re.IGNORECASE),
 )
@@ -51,7 +56,7 @@ def request_authorizes_deletion(request_text: str) -> bool:
     if any(pattern.search(latin) for pattern in _DELETION_PATTERNS):
         return True
     # Portuguese, Spanish, and French terms after accent folding.
-    if re.search(r"\b(exclusao|eliminacion|supression|suppression)\b", latin):
+    if re.search(r"\b(exclusao|excluir|apagar|eliminacion|eliminar|borrar|supression|suppression|supprimer|effacer)\b", latin):
         return True
     # Japanese and Korean terms used by the supplied request templates.
     return "削除" in text or "삭제" in text
@@ -76,6 +81,8 @@ def _resolve_case_subject(request: Mapping[str, str], dataset: Dataset) -> Resol
         user_id="",
         identifiers=frozenset().union(*(subject.identifiers for subject in subjects)),
         linked_resource_ids=frozenset().union(*(subject.linked_resource_ids for subject in subjects)),
+        weak_identifiers=frozenset().union(*(subject.weak_identifiers for subject in subjects)),
+        name_identifiers=frozenset().union(*(subject.name_identifiers for subject in subjects)),
     )
 
 

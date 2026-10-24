@@ -31,19 +31,50 @@ Your solution must:
 - Generate one prediction row for every request in `dataset/deletion_requests.csv`
 - Write the final predictions to `output.csv` in the repository root
 
-Use Python 3.10 or newer, then install the Python packages:
+The evaluated environment used Python 3.14.3. For the same measured accuracy,
+use Python 3.14.3 and the pinned packages below. Python 3.10 or newer can run
+the code, but a different runtime or OCR engine can change parsing results.
+Create a virtual environment and install the pinned Python packages from the
+repository root:
 
-```bash
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 ```
 
 Image evidence is read with Tesseract OCR through `pytesseract`. Install the
 Tesseract OCR engine for your operating system as well as the Python packages.
-Then run:
+The evaluated environment used Tesseract `5.4.0.20240606`; use that version to
+keep screenshot extraction consistent. The core audit logic is deterministic;
+using another OCR version can change the text extracted from screenshots. It
+must be on `PATH`, or set
+`TESSERACT_CMD` to its executable path. On Windows, the standard
+`C:\Program Files\Tesseract-OCR\tesseract.exe` location is detected
+automatically. All dataset and output paths resolve relative to the project,
+so the same command works from another checkout. Run the audit from the
+repository root:
 
 ```bash
-python code/main.py
+python3 code/main.py
 ```
+
+In Windows PowerShell, use `python code/main.py` after activating `.venv`.
+Run the custom checks and public sample comparison with:
+
+```powershell
+python -m unittest discover -s code/evaluation -p "test_*.py"
+python code/evaluation/evaluate_samples.py
+python code/evaluation/validate_output.py
+```
+
+The evaluation results and local usage accounting are recorded in
+[`code/evaluation/evaluation_report.md`](code/evaluation/evaluation_report.md)
+and [`code/evaluation/usage_report.md`](code/evaluation/usage_report.md).
+
+The production classifier has no case-ID branches or sample-answer lookup.
+It applies the same identity, evidence, and policy rules to each request. The
+public sample answers are read only by the separate evaluation command.
 
 The command reads the CSV inputs, indexes every file listed in
 `dataset/evidence_files.csv`, audits requests at their `audit_at` cutoff, and
