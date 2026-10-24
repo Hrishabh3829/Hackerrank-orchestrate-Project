@@ -31,32 +31,42 @@ Your solution must:
 - Generate one prediction row for every request in `dataset/deletion_requests.csv`
 - Write the final predictions to `output.csv` in the repository root
 
-Run the starter Python entry point with:
+Use Python 3.10 or newer, then install the Python packages:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+Image evidence is read with Tesseract OCR through `pytesseract`. Install the
+Tesseract OCR engine for your operating system as well as the Python packages.
+Then run:
 
 ```bash
 python code/main.py
 ```
 
-At the current setup stage, this command validates and summarizes the required
-CSV inputs and evidence manifest. It does not create predictions yet; the
-case investigation and output pipeline are the next implementation step.
+The command reads the CSV inputs, indexes every file listed in
+`dataset/evidence_files.csv`, audits requests at their `audit_at` cutoff, and
+writes predictions to the repository-root `output.csv`. Use `--dataset-dir`
+and `--output` to provide alternate paths.
 
 ## Python project layout
 
-The scaffold keeps each responsibility in its own module:
+The implementation keeps each responsibility in its own module:
 
 | Module | Responsibility |
 | --- | --- |
-| `code/main.py` | CLI entry point and dataset intake summary |
+| `code/main.py` | CLI entry point for end-to-end deletion audits |
 | `code/data_loading.py` | Read and validate the source CSV files and evidence manifest |
 | `code/identity_resolution.py` | Resolve request emails against current and historical identifiers at a cutoff |
-| `code/investigation.py` | Case-level evidence investigation hook |
-| `code/policies.py` | Load policy rules and look them up by data category |
+| `code/evidence.py` | Extract records from JSON, SQL, logs, text, PDFs, and screenshots |
+| `code/timeline.py` | Link records and operational events using only evidence available by `audit_at` |
+| `code/investigation.py` | Classify request intent, resolve the subject, and build ordered findings and checks |
+| `code/policies.py` | Apply deletion, redaction, anonymization, retention, and recreation-risk rules |
 | `code/output_generation.py` | Validate steps and serialize sorted output rows |
 
-The current code uses only the Python standard library, so no third-party
-packages are required. `requirements.txt` is kept for dependencies added in
-later steps.
+PDF extraction uses `pypdf`; screenshot OCR uses `Pillow`, `pytesseract`, and
+the separately installed Tesseract executable.
 
 The blank template at `dataset/output.csv` is provided as a reference. Your final generated file for submission must be the root-level `output.csv`.
 
