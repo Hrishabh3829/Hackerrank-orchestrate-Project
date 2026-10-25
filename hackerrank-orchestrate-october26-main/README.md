@@ -90,6 +90,7 @@ The implementation keeps each responsibility in its own module:
 | `code/main.py` | CLI entry point for end-to-end deletion audits |
 | `code/data_loading.py` | Read and validate the source CSV files and evidence manifest |
 | `code/identity_resolution.py` | Resolve request emails against current and historical identifiers at a cutoff |
+| `code/matching.py` | Shared boundary-aware matching for emails, phones, names, hashes, and opaque IDs |
 | `code/evidence.py` | Extract records from JSON, SQL, logs, text, PDFs, and screenshots |
 | `code/timeline.py` | Link records and operational events using only evidence available by `audit_at` |
 | `code/investigation.py` | Classify request intent, resolve the subject, and build ordered findings and checks |

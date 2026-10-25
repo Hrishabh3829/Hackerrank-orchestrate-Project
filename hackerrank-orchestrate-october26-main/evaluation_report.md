@@ -23,7 +23,7 @@ python code/evaluation/evaluate_samples.py
 
 ## Independent regression cases
 
-Thirty synthetic `unittest` checks are maintained in `test_agent.py`. They
+Thirty-three synthetic `unittest` checks are maintained in `test_agent.py`. They
 exercise general behavior without reading or hardcoding sample answers. The
 suite includes:
 
@@ -39,11 +39,12 @@ suite includes:
 5. **PII handling:** preserve a stable tombstone reference while detecting
    direct identifiers, and apply the marketing deletion policy to explicit
    consent records.
-6. **Parsing safeguards:** require whole-name boundaries, match email hashes
-   as opaque identifiers, and classify nested support, attachment, and JSON
-   records from their content.
+6. **Parsing safeguards:** require whole-name and whole-email boundaries,
+   match email hashes as opaque identifiers, and classify nested support,
+   attachment, and JSON records from their content.
 7. **Output contract:** serialize valid, ordered steps and verify snapshot-based
-   absence only when the scope supports it.
+   absence only when the scope supports it; reject stale negative lookup logs
+   as proof of current absence.
 
 Run the checks with:
 
@@ -51,7 +52,7 @@ Run the checks with:
 python -m unittest discover -s code/evaluation -p "test_*.py"
 ```
 
-Result for this version: **30 tests passed**.
+Result for this version: **33 tests passed**.
 
 ## Failures found and improvements made
 
@@ -59,6 +60,10 @@ Result for this version: **30 tests passed**.
   It now requires token boundaries, reducing false identity links.
 - Hexadecimal email hashes were incorrectly eligible for phone-digit matching.
   Hash-shaped identifiers now use exact opaque-value matching.
+- Matching was duplicated between identity and evidence resolution, and email
+  substrings could match neighboring addresses. Both stages now share the same
+  cached, boundary-aware matcher for emails, phones, hashes, names, and opaque
+  identifiers.
 - A nearby worker event can supply a resource lookup seed when it is uniquely
   associated with one request's report time. The event remains a claim; a
   current evidence row or snapshot is still required to establish state.
@@ -69,6 +74,11 @@ Result for this version: **30 tests passed**.
 - Log resource extraction could interpret service instance names as user
   records. Structured logs now require a resource field or a labeled resource
   reference.
+- A lookup's `*_started` line is not a state result, and an old 404 query does
+  not prove that a record is absent at a later audit time. Start events are
+  excluded from state selection and negative log reads must be recent.
+- Some logs use a resource ID in the explicit `lookup_key` field. Such values
+  now join the evidence graph only when they match the resource-ID format.
 - PDF parsing clipped identifiers before related subject fields on the same
   page. Extraction now preserves the section through the next resource
   reference, and attachment context takes precedence over incidental delivery
@@ -91,8 +101,8 @@ set accuracy.
 ## Full output validation
 
 The final run processed all 518 requests and wrote the repository-root
-`output.csv`: 153 `COMPLETE`, 356 `INCOMPLETE`, and 9 `NOT_APPLICABLE`, with
-2,553 total steps. The validator confirmed all rows are sorted and complete,
+`output.csv`: 156 `COMPLETE`, 353 `INCOMPLETE`, and 9 `NOT_APPLICABLE`, with
+2,507 total steps. The validator confirmed all rows are sorted and complete,
 the exact required columns, valid JSON and evidence references, consecutive
 step numbers, and required phase and operation ordering.
 
